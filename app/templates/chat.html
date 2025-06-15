@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Secure Chat</title>
+  <link href="/static/styles.css" rel="stylesheet">
+</head>
+<body class="p-4">
+  <h2 class="text-lg font-bold mb-4">🛡️ Secure Serverless Chat</h2>
+
+  <div class="mb-4">
+    <label class="block mb-1">🔗 Your Invite String:</label>
+    <textarea id="myInvite" class="w-full p-2 border rounded" readonly></textarea>
+  </div>
+
+  <div class="mb-4">
+    <label class="block mb-1">📩 Paste Partner's Invite:</label>
+    <textarea id="theirInvite" class="w-full p-2 border rounded" placeholder="Paste partner's invite string here..."></textarea>
+    <button onclick="establishConnection()" class="mt-2 bg-green-600 text-white px-4 py-1 rounded">Connect</button>
+  </div>
+
+  <div id="chat" class="hidden">
+    <div id="chat-box" class="h-64 border rounded p-2 mb-2 overflow-y-scroll bg-gray-100"></div>
+    <form onsubmit="sendMessage(); return false;" class="flex gap-2">
+      <input id="message" class="border p-2 flex-1" placeholder="Message...">
+      <button class="bg-blue-600 text-white px-4 py-2 rounded">Send</button>
+    </form>
+  </div>
+
+  <script>
+    let ws = new WebSocket("ws://" + location.host + "/ws");
+    let aesKey = null;
+    let myKeyPair;
+
+    async function generateKeys() {
+      myKeyPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
+      const exported = await crypto.subtle.exportKey("raw", myKeyPair.publicKey);
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+      document.getElementById("myInvite").value = base64;
+    }
+
+    async function establishConnection() {
+      const peerKeyRaw = Uint8Array.from(atob(document.getElementById("theirInvite").value), c => c.charCodeAt(0));
+      const peerKey = await crypto.subtle.importKey("raw", peerKeyRaw, { name: "ECDH", namedCurve: "P-256" }, true, []);
+      aesKey = await crypto.subtle.deriveKey(
+        { name: "ECDH", public: peerKey },
+        myKeyPair.privateKey,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+      );
+      document.getElementById("chat").classList.remove("hidden");
+    }
+
+    async function sendMessage() {
+      const text = document.getElementById("message").value;
+      const { encrypted, iv } = await encryptMessage(text);
+      const payload = {
+        iv: iv,
+        data: encrypted,
+        expireIn: 30,  // seconds
+        viewOnce: true
+      };
+      ws.send(JSON.stringify(payload));
+      document.getElementById("message").value = '';
+    }
+
+    async function encryptMessage(plaintext) {
+      const encoder = new TextEncoder();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv },
+        aesKey,
+        encoder.encode(plaintext)
+      );
+      return {
+        iv: btoa(String.fromCharCode(...iv)),
+        encrypted: btoa(String.fromCharCode(...new Uint8Array(ciphertext)))
+      };
+    }
+
+    async function decryptMessage(data, iv) {
+      const ivBytes = Uint8Array.from(atob(iv), c => c.charCodeAt(0));
+      const encryptedBytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, aesKey, encryptedBytes);
+      return new TextDecoder().decode(decrypted);
+    }
+
+    // Incoming messages
+    ws.onmessage = async (event) => {
+      const msg = JSON.parse(event.data);
+      if (!msg || !msg.data) return;
+
+      const text = await decryptMessage(msg.data, msg.iv);
+      const el = document.createElement("div");
+      el.textContent = `👤 ${text}`;
+      el.className = "mb-1 text-sm text-gray-800";
+
+      const chat = document.getElementById("chat-box");
+      chat.appendChild(el);
+      chat.scrollTop = chat.scrollHeight;
+
+      // View Once — remove after showing
+      if (msg.viewOnce) {
+        setTimeout(() => el.remove(), 1000);
+      }
+
+      // Self-Destruct
+      if (msg.expireIn) {
+        setTimeout(() => el.remove(), msg.expireIn * 1000);
+      }
+    };
+
+    // Screenshot warning
+    document.addEventListener("keydown", e => {
+      if (e.key === "PrintScreen") {
+        alert("⚠️ Screenshots are discouraged in this secure chat.");
+        e.preventDefault();
+      }
+    });
+
+    generateKeys();
+  </script>
+</body>
+</html>
